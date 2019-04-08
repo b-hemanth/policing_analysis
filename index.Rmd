@@ -1,0 +1,205 @@
+---
+title: "Stanford Open Policing Data: Analysis"
+author: "Hemanth Bharatha Chakravarthy"
+date: "4/2/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message = FALSE, fig.align = 'center')
+# Include packages
+library(tidyverse)
+library(readr)
+library(janitor)
+library(gganimate)
+library(gt)
+library(ggplot2)
+library(lubridate)
+library(ggthemes)
+library(cowplot)
+library(ggmap)
+library(ggrepel)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(socviz)
+library(maps)
+library(mapproj)
+library(transformr)
+# Download rds file
+hartford <- read_rds(url("https://stacks.stanford.edu/file/druid:tr137st9964/tr137st9964_ct_hartford_2019_02_25.rds")) %>% 
+  # Clean the column names
+  clean_names()
+```
+
+# 1 Arrest Rate Demographic Analysis
+```{r arrest_race_gender}
+# group by race and sex and count
+arrest_demog <- hartford %>% 
+  group_by(subject_race, subject_sex) %>% 
+  count(arrest_made) %>% 
+  # Spread to get the required frequency distribution
+  spread(arrest_made, n) 
+# Change NAs to 0 to avoid calculation errors
+arrest_demog[is.na(arrest_demog)] <- 0
+# Convert to precent and spread again to get required distribution fomrat
+arrest_demog <- arrest_demog %>% 
+  mutate(total = `TRUE` + `FALSE`,
+         `TRUE` = `TRUE`/total) %>% 
+  select(subject_race, subject_sex, `TRUE`) %>% 
+  spread(subject_sex, `TRUE`) 
+# Rename variables for presentation
+a <- data.frame(new_race=c("Asian or Pacific Islander", "Black", "Hispanic", "Other/Unkown", "White"), subject_race = arrest_demog$subject_race)
+arrest_demog <- arrest_demog %>% 
+  full_join(a, by = "subject_race")
+# ungroup and rearrange
+arrest_demog <- arrest_demog %>% 
+  ungroup() %>% 
+  select(new_race, male, female) %>% 
+  arrange(desc(female))
+# present using gt table and format the numbers as percents
+arrest_demog %>% 
+  gt(rowname_col = "new_race") %>% 
+  fmt_percent(
+    columns = vars(male, female),
+    decimals = 2
+  ) %>% 
+  tab_header(
+    "Rate of Police Stops that Resulted in Arrests in Hartford, CT, Across Different Races and Genders from 2013-10-13 to 2016-09-29"
+    ) %>% 
+  tab_source_note("Data from Stanford Open Policing Project") %>% 
+  cols_label(
+    male = html("Male"),
+    female = html("Female")
+  )
+```
+
+# 2 Timing of Arrests
+```{r time_arrests}
+# COnvert to minute to find which minutes of any hour
+# This is best as we dont cvare about the day or which hours, merely which part of the hour
+time <- hartford %>% 
+  mutate(minute = minute(time)) %>% 
+  group_by(minute) %>% 
+  count() 
+# plot
+# use line chart because it's a continuous variable (time)
+# USe economist theme for style
+time %>%
+  ggplot(aes(x = minute, y = n)) +
+  geom_line() + 
+  theme_economist() +
+  scale_color_economist() + 
+  labs(
+    title = "Frequency of Police Stops Made in Different Parts of the Hour 
+    in Hartford, CT, from 2013-10-13 to 2016-09-29",
+    subtitle = "At any hour in the day, the reported minute-by-minute time of stops tended towards 
+    round-number times",
+    caption = "Data from Stanford Open Policing Project",
+    x = "Minute of the Hour",
+    y = "Frequency"
+  ) + 
+  scale_x_time(
+    breaks = c("0", "5","10", "15","20", "25","30", "35","40", "45","50", "55","60"), 
+    labels = c(":00", ":05",":10", ":15",":20", ":25",":30", ":35",":40", ":45",":50", ":55",":60")
+    ) +
+  # Add line to hiighlight the distribution's peculiarity
+  geom_vline(xintercept = c(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60), col="red", lwd=0.5, lty=2)
+```
+
+# 3 Geospatial Analysis
+```{r pre-processing_mapping}
+# download required files and delete once made copy of
+download.file(
+  url = "https://stacks.stanford.edu/file/druid:tr137st9964/tr137st9964_ct_hartford_shapefiles_2019_02_25.tgz",
+  destfile = "shapes.tgz")
+untar("shapes.tgz")
+shapes <- read_sf("ct_hartford_shapefiles/Hartford_Neighborhoods.shp")
+fs::file_delete(c("ct_hartford_shapefiles/", "shapes.tgz"))
+```
+
+
+```{r hartford_map}
+# filter coords so that those points far away from map are removed 
+# Thhis filtering creates an appropriate zoom in
+# This analysis is a good design decision for the following reasons
+# - we see which areas vehicle were likely to speed in
+# - we spot raicial coreelation that can be associated with who was pulled over as well as who speeded
+fix_roads <- hartford %>% 
+  filter(reason_for_stop == "Speed Related", type == "vehicular", !is.na(lat), !is.na(lng), !is.na(outcome)) %>% 
+  filter(lng > -72.8041, lng < -72.60115, lat > 41.71912, lat < 41.8817)
+# Convert to SF
+fix_roads_l <- st_as_sf(fix_roads, coords = c("lng", "lat"), crs = 4326) %>% 
+  select(subject_race, geometry)
+# Recode race names for presentation
+recode(hartford$subject_race, black="African American", white = "White", `other/unkown` =  "Other/Unkown", `asian/pacific islander` = "Asian/Pacific Islander", hispanic = "Hispanic") -> hartford$subject_race
+# Plot
+# Decided to recude opaqueness to improve visibility
+ggplot(data = shapes) +
+geom_sf() +
+geom_sf(data = fix_roads_l, aes(color = subject_race, alpha = 0.6)) +
+theme_map() +
+labs(
+  title = "Mapping Police Stops for Vehicular Speeding in Hartford, CT, from 
+  2013-10-13 to 2016-09-29 Across Different Racial Groups",
+  subtitle = "A Map of Hartford's Speeding Prone Areas and the Racial Distribution of those Pulled Over for Speeding",
+  caption = "Data from Stanford Open Policing Project",
+  x = "Latitude",
+  y = "Longitude",
+  color = "Race"
+) +
+  scale_alpha_continuous(guide = FALSE)
+  
+```
+
+# 4 Animated Geospatial Analysis for Santa Ana, California
+```{r pre-processing_5}
+#Santa Ana, CA
+# Download data
+download.file(
+  url = "https://stacks.stanford.edu/file/druid:tr137st9964/tr137st9964_ca_santa_ana_shapefiles_2019_02_25.tgz",
+  destfile = "sa.tgz")
+untar("sa.tgz")
+shapes_sa <- read_sf("ca_santa_ana_shapefiles/districts83.shp")
+fs::file_delete(c("ca_santa_ana_shapefiles/", "sa.tgz"))
+sa <- read_rds(url("https://stacks.stanford.edu/file/druid:tr137st9964/tr137st9964_ca_santa_ana_2019_02_25.rds"))
+```
+
+
+```{r houston_animated}
+# filter for dates in 2018 to track over months of most recent completed year
+# Drop NA nonsense values
+sa_plot <- sa %>%
+  drop_na(lat, lng, date) %>%
+  filter(citation_issued, type == "vehicular", date > "2017-12-31") %>% 
+  filter(date < "2019-01-01") %>% 
+  filter(lat > 33.268599, lat < 34.6385, lng < -117.0979, lng > -117.9385) %>% 
+  mutate(month_nm = month(date, label = TRUE), month = month(date)) %>% 
+  select(lat, lng, subject_race, citation_issued, month, month_nm)
+# pick a random sample
+# Did this to retain learnings and at the same time ensure gganimate actually works on my laptop
+sa_plot <- sa_plot[sample(nrow(sa_plot), 500), ]
+# Recode race names for presentation
+recode(sa_plot$subject_race, black="African American", white = "White", `other/unkown` =  "Other/Unkown", `asian/pacific islander` = "Asian/Pacific Islander", hispanic = "Hispanic") -> sa_plot$subject_race
+# Convert to SF object
+x <- st_as_sf(sa_plot, coords = c("lng", "lat"), crs = 4326) %>%
+  select(subject_race, month, month_nm, geometry)
+# plot gganimate over months
+ggplot(data = shapes_sa) +
+geom_sf() +
+geom_sf(data = x, aes(color = subject_race, alpha = 0.6)) +
+theme_map() +
+labs(
+  title = 'Animated Map of a Sample of Police Stops of Vehicles in 2018 in 
+  Santa Ana, CA, that Resulted in Arrests Across Different Races',
+  # This seems to be the only option for labeling though pretty imperfect
+  subtitle = "Month {frame_time} of 12 Months of 2018",
+  caption = "Data from Stanford Open Policing Project; sample of 500 randomly chosen",
+  x = "Latitude",
+  y = "Longitude",
+  color = "Race"
+) +
+  scale_alpha_continuous(guide = FALSE) +
+  # Using transformr as gganimate can't yet work with SF
+  transition_time(month) 
+```
